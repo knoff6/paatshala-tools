@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from bs4 import BeautifulSoup
 
+BASE = "https://paatshala.ictkerala.org"
 PAATSHALA_HOST = "paatshala.ictkerala.org"
 CONFIG_FILE = ".config"
 
@@ -70,6 +71,25 @@ def login_and_get_cookie(username, password):
     except Exception as e:
         print(f"[Login] ✗ Login error: {e}")
         return None
+
+def logout_session(session):
+    """Logout from Moodle to clean up the session"""
+    try:
+        logout_url = f"{BASE}/login/logout.php?sesskey="
+        # Try to get sesskey from a page first
+        resp = session.get(f"{BASE}/my/", timeout=10)
+        if resp.ok:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            # Look for sesskey in any form or link
+            sesskey_input = soup.find("input", {"name": "sesskey"})
+            if sesskey_input:
+                sesskey = sesskey_input.get("value", "")
+                logout_url = f"{BASE}/login/logout.php?sesskey={sesskey}"
+        
+        session.get(logout_url, timeout=10)
+        print("[Logout] ✓ Session closed")
+    except Exception as e:
+        print(f"[Logout] ⚠ Could not logout cleanly: {e}")
 
 def get_thread_session(session_id: str) -> requests.Session:
     """Get or create a session for the current thread"""
@@ -155,7 +175,7 @@ def fetch_scores_for_module(session_id: str, module_id: str):
                 scores[name] = max(scores[name], grade)
                 attempt_count += 1
 
-    print(f"[T{tid}] ✓ Module {module_id} — {len(scores)} students, {attempt_count} attempts")
+    print(f"[T{tid}] ✓ Module {module_id} – {len(scores)} students, {attempt_count} attempts")
     return module_id, scores, attempt_count
 
 if __name__ == "__main__":
@@ -231,6 +251,7 @@ Examples:
     quizzes = get_quizzes(main_session, args.course_id)
     if not quizzes:
         print("[Main] ✗ No practice quizzes found.")
+        logout_session(main_session)
         sys.exit(1)
 
     print(f"[Main] Found {len(quizzes)} practice quizzes\n")
@@ -258,6 +279,7 @@ Examples:
 
     if not all_scores:
         print("[Main] ✗ No student data found.")
+        logout_session(main_session)
         sys.exit(1)
 
     students = sorted(all_scores.keys())
@@ -278,3 +300,5 @@ Examples:
     print(f"[Main]  Total time: {elapsed:.2f}s")
     print(f"[Main]  Avg per quiz: {elapsed/len(quiz_names_ordered):.2f}s")
     print("=" * 70)
+    
+    logout_session(main_session)
