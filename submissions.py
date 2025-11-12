@@ -13,7 +13,7 @@ Usage:
   or use .config with username/password
 """
 
-import os, re, csv, sys, argparse
+import os, re, csv, sys, argparse, getpass
 import requests
 from bs4 import BeautifulSoup
 
@@ -22,11 +22,11 @@ PAATSHALA_HOST = "paatshala.ictkerala.org"
 CONFIG_FILE = ".config"
 
 def read_config(config_path=CONFIG_FILE):
-    """Read username and password from config file"""
+    """Read cookie, username, and password from config file"""
     if not os.path.exists(config_path):
-        return None, None
+        return None, None, None
     
-    username, password = None, None
+    cookie, username, password = None, None, None
     try:
         with open(config_path, 'r') as f:
             for line in f:
@@ -37,15 +37,76 @@ def read_config(config_path=CONFIG_FILE):
                     key, value = line.split('=', 1)
                     key = key.strip().lower()
                     value = value.strip().strip('"').strip("'")
-                    if key == 'username':
+                    if key == 'cookie':
+                        cookie = value
+                    elif key == 'username':
                         username = value
                     elif key == 'password':
                         password = value
-        print(f"[Config] Read credentials from {config_path}")
-        return username, password
+        if cookie:
+            print(f"[Config] Read cookie from {config_path}")
+        elif username and password:
+            print(f"[Config] Read credentials from {config_path}")
+        return cookie, username, password
     except Exception as e:
         print(f"[Config] Error reading {config_path}: {e}")
-        return None, None
+        return None, None, None
+
+def write_config(config_path, cookie=None, username=None, password=None):
+    """Write cookie or credentials to config file"""
+    try:
+        lines = []
+        existing_keys = set()
+        
+        # Read existing config if it exists
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                for line in f:
+                    line_stripped = line.strip()
+                    # Keep comments and empty lines
+                    if not line_stripped or line_stripped.startswith('#'):
+                        lines.append(line)
+                        continue
+                    # Parse key=value
+                    if '=' in line_stripped:
+                        key = line_stripped.split('=', 1)[0].strip().lower()
+                        existing_keys.add(key)
+                        # Skip lines we're updating
+                        if cookie and key == 'cookie':
+                            continue
+                        if username and key == 'username':
+                            continue
+                        if password and key == 'password':
+                            continue
+                        lines.append(line)
+                    else:
+                        lines.append(line)
+        
+        # Add new values
+        if cookie and 'cookie' not in existing_keys:
+            lines.append(f"cookie={cookie}\n")
+        elif cookie:
+            # Insert at beginning if updating
+            lines.insert(0, f"cookie={cookie}\n")
+        
+        if username and 'username' not in existing_keys:
+            lines.append(f"username={username}\n")
+        
+        if password and 'password' not in existing_keys:
+            lines.append(f"password={password}\n")
+        
+        # Write back to file
+        with open(config_path, 'w') as f:
+            f.writelines(lines)
+        
+        if cookie:
+            print(f"[Config] Saved cookie to {config_path}")
+        elif username and password:
+            print(f"[Config] Saved credentials to {config_path}")
+        return True
+    except Exception as e:
+        print(f"[Config] Error writing to {config_path}: {e}")
+        return False
 
 def login_and_get_cookie(username, password):
     """Login to Paathshala and extract session cookie"""
@@ -77,30 +138,47 @@ def login_and_get_cookie(username, password):
         print(f"[Login] ✗ Login error: {e}")
         return None
 
+def validate_session(session_id):
+    """Check if a session cookie is valid by making a test request"""
+    try:
+        s = requests.Session()
+        s.cookies.set("MoodleSession", session_id, domain=PAATSHALA_HOST)
+        s.headers.update({'User-Agent': 'Mozilla/5.0'})
+        
+        # Try to access the main page
+        resp = s.get(f"{BASE}/my/", timeout=10)
+        
+        # Check if we're redirected to login page or get a valid response
+        if resp.ok and 'login' not in resp.url.lower():
+            return True
+        return False
+    except Exception:
+        return False
+
+def prompt_for_credentials():
+    """Interactively prompt user for username and password"""
+    print("\n[Auth] Cookie appears to be invalid or expired.")
+    print("[Auth] Please enter your credentials to continue:\n")
+    
+    try:
+        username = input("Username: ").strip()
+        if not username:
+            return None, None
+        
+        password = getpass.getpass("Password: ").strip()
+        if not password:
+            return None, None
+        
+        return username, password
+    except (KeyboardInterrupt, EOFError):
+        print("\n[Auth] Login cancelled by user")
+        return None, None
+
 def setup_session(session_id):
     s = requests.Session()
     s.cookies.set("MoodleSession", session_id, domain=PAATSHALA_HOST)
     s.headers.update({'User-Agent': 'Mozilla/5.0'})
     return s
-
-def logout_session(session):
-    """Logout from Moodle to clean up the session"""
-    try:
-        logout_url = f"{BASE}/login/logout.php?sesskey="
-        # Try to get sesskey from a page first
-        resp = session.get(f"{BASE}/my/", timeout=10)
-        if resp.ok:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            # Look for sesskey in any form or link
-            sesskey_input = soup.find("input", {"name": "sesskey"})
-            if sesskey_input:
-                sesskey = sesskey_input.get("value", "")
-                logout_url = f"{BASE}/login/logout.php?sesskey={sesskey}"
-        
-        session.get(logout_url, timeout=10)
-        print("[Logout] ✓ Session closed")
-    except Exception as e:
-        print(f"[Logout] ⚠ Could not logout cleanly: {e}")
 
 def text_or_none(node):
     return node.get_text(" ", strip=True) if node else ""
@@ -269,41 +347,50 @@ def main():
         epilog="""
 Authentication (in order of priority):
   1. --cookie flag
-  2. MOODLE_SESSION_ID environment variable
-  3. .config file with username/password
+  2. --username and --password flags (generates and saves cookie to .config)
+  3. MOODLE_SESSION_ID environment variable
+  4. cookie from .config file
+  5. username/password from .config file (generates and saves cookie)
 
 Config file format (.config):
-  username=your_username
-  password=your_password
+  Option 1 (reusable cookie - fastest):
+    cookie=your_cookie_value
+  
+  Option 2 (credentials - will auto-generate and save cookie):
+    username=your_username
+    password=your_password
 
 Examples:
   # List available groups for first assignment
-  python paatshala_submissions.py 450 --tasks-csv tasks_450.csv --list-groups
+  python submissions.py 450 --tasks-csv tasks_450.csv --list-groups
 
-  # Fetch first task (user-friendly) - REQUIRES --tasks-csv
-  python paatshala_submissions.py 450 --tasks-csv tasks_450.csv --task 1
-  python paatshala_submissions.py 450 --tasks-csv tasks_450.csv --first  # same as above
+  # First time with username/password (generates and saves cookie)
+  python submissions.py 450 --tasks-csv tasks_450.csv --task 1 --username myuser --password mypass
+
+  # Subsequent runs (reuses saved cookie - much faster!)
+  python submissions.py 450 --tasks-csv tasks_450.csv --task 1
+  python submissions.py 450 --tasks-csv tasks_450.csv --first  # same as above
 
   # Fetch second task
-  python paatshala_submissions.py 450 --tasks-csv tasks_450.csv --task 2
+  python submissions.py 450 --tasks-csv tasks_450.csv --task 2
 
   # Fetch first task filtered by second group (user-friendly)
-  python paatshala_submissions.py 450 --tasks-csv tasks_450.csv --task 1 --group 2
+  python submissions.py 450 --tasks-csv tasks_450.csv --task 1 --group 2
   # Output: submissions_450_mod28922_grp3345.csv
 
   # Fetch first task filtered by specific group ID (exact)
-  python paatshala_submissions.py 450 --tasks-csv tasks_450.csv --task 1 --group-id 3345
+  python submissions.py 450 --tasks-csv tasks_450.csv --task 1 --group-id 3345
 
   # Fetch specific module by ID
-  python paatshala_submissions.py 450 --module-id 28922
+  python submissions.py 450 --module-id 28922
   # Output: submissions_450_mod28922.csv
 
   # Fetch specific module filtered by second group
-  python paatshala_submissions.py 450 --module-id 28922 --group 2
+  python submissions.py 450 --module-id 28922 --group 2
   # Output: submissions_450_mod28922_grp3345.csv
 
   # Process all tasks for second group
-  python paatshala_submissions.py 450 --tasks-csv tasks_450.csv --group 2
+  python submissions.py 450 --tasks-csv tasks_450.csv --group 2
   # Output: submissions_450_grp3345.csv (multiple tasks)
         """
     )
@@ -316,6 +403,8 @@ Examples:
     parser.add_argument("--group-id", help="Exact Group ID to filter by (e.g., --group-id 3345)")
     parser.add_argument("--list-groups", action="store_true", help="List available groups for the first/specified assignment and exit")
     parser.add_argument("--cookie", "-c", help="Moodle session cookie")
+    parser.add_argument("--username", "-u", help="Username for login (will generate and save cookie)")
+    parser.add_argument("--password", "-p", help="Password for login (will generate and save cookie)")
     parser.add_argument("--config", type=str, default=CONFIG_FILE, help=f"Config file path (default: {CONFIG_FILE})")
     parser.add_argument("--output", "-o", help="Output CSV filename")
     args = parser.parse_args()
@@ -327,26 +416,85 @@ Examples:
     # Get session cookie
     SESSION_ID = None
     
+    # 1. Command line cookie argument
     if args.cookie:
         SESSION_ID = args.cookie
         print("[Auth] Using cookie from command line")
+    
+    # 2. Command line username/password arguments
+    elif args.username and args.password:
+        print("[Auth] Using username/password from command line")
+        SESSION_ID = login_and_get_cookie(args.username, args.password)
+        if SESSION_ID:
+            # Save cookie to config for future use
+            write_config(args.config, cookie=SESSION_ID)
+        else:
+            print("\n[Auth] ✗ Login failed. Please check credentials.")
+            sys.exit(1)
+    
+    # 3. Environment variable
     elif os.environ.get("MOODLE_SESSION_ID"):
         SESSION_ID = os.environ.get("MOODLE_SESSION_ID")
         print("[Auth] Using cookie from MOODLE_SESSION_ID environment variable")
+    
+    # 4. Config file (cookie or username/password)
     else:
-        username, password = read_config(args.config)
-        if username and password:
+        cookie, username, password = read_config(args.config)
+        
+        # 4a. Try cookie from config first
+        if cookie:
+            SESSION_ID = cookie
+            print("[Auth] Using saved cookie from config")
+        
+        # 4b. Try username/password from config
+        elif username and password:
+            print("[Auth] Using credentials from config")
             SESSION_ID = login_and_get_cookie(username, password)
-            if not SESSION_ID:
+            if SESSION_ID:
+                # Save cookie to config for future use
+                write_config(args.config, cookie=SESSION_ID)
+            else:
                 print("\n[Auth] ✗ Auto-login failed. Please check credentials.")
                 sys.exit(1)
+        
+        # No authentication found
         else:
             print(f"\n[Auth] ✗ No authentication provided.")
             print(f"\nProvide authentication via:")
             print(f"  1. Command line: --cookie 'your_cookie'")
-            print(f"  2. Environment:  export MOODLE_SESSION_ID='your_cookie'")
-            print(f"  3. Config file:  Create {args.config} with username/password")
+            print(f"  2. Command line: --username 'user' --password 'pass'")
+            print(f"  3. Environment:  export MOODLE_SESSION_ID='your_cookie'")
+            print(f"  4. Config file:  Create {args.config} with cookie or username/password")
+            print(f"\nConfig file format (option 1 - reusable cookie):")
+            print(f"  cookie=your_cookie_value")
+            print(f"\nConfig file format (option 2 - will generate and save cookie):")
+            print(f"  username=your_username")
+            print(f"  password=your_password")
             sys.exit(1)
+
+    # Validate the session cookie and prompt for credentials if invalid
+    if SESSION_ID:
+        print("[Auth] Validating session...")
+        if not validate_session(SESSION_ID):
+            print("[Auth] ✗ Cookie is invalid or expired")
+            
+            # Prompt for credentials interactively
+            username, password = prompt_for_credentials()
+            
+            if username and password:
+                SESSION_ID = login_and_get_cookie(username, password)
+                if SESSION_ID:
+                    # Save the new cookie
+                    write_config(args.config, cookie=SESSION_ID)
+                    print("[Auth] ✓ Successfully logged in with new credentials")
+                else:
+                    print("\n[Auth] ✗ Login failed. Please check credentials and try again.")
+                    sys.exit(1)
+            else:
+                print("\n[Auth] ✗ No credentials provided. Exiting.")
+                sys.exit(1)
+        else:
+            print("[Auth] ✓ Session is valid")
 
     s = setup_session(SESSION_ID)
     
@@ -404,7 +552,6 @@ Examples:
         else:
             print("✗ No groups found or assignment has no group mode")
         
-        logout_session(s)
         sys.exit(0)
     
     # Determine which module(s) to fetch
@@ -449,14 +596,12 @@ Examples:
         
         if not groups:
             print("✗ No groups found for this assignment")
-            logout_session(s)
             sys.exit(1)
         
         if args.group < 1 or args.group > len(groups):
             print(f"✗ Group number {args.group} is out of range (1-{len(groups)})")
             print(f"   Available groups: {len(groups)}")
             print(f"   Use --list-groups to see all available groups")
-            logout_session(s)
             sys.exit(1)
         
         group_id_to_use, group_name = groups[args.group - 1]  # Convert to 0-indexed
@@ -494,7 +639,6 @@ Examples:
     
     if not all_results:
         print("✗ No data collected")
-        logout_session(s)
         sys.exit(1)
     
     # Generate output filename with module_id and group_id
@@ -531,8 +675,6 @@ Examples:
     if group_id_to_use:
         print(f"  Group filter: {group_description}")
     print("=" * 70)
-    
-    logout_session(s)
 
 if __name__ == "__main__":
     main()
