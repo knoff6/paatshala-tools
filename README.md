@@ -639,6 +639,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Version:** 2.1  
 **Last Updated:** November 2025  
-**Maintainer:** [Your Name](https://github.com/knoff6)
+**Maintainer:** [knoff6](https://github.com/knoff6)
 
 Made with ❤️ for educators
