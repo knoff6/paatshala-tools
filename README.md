@@ -1,4 +1,4 @@
-# Paathshala Data Scraper
+# Paathshala Tools
 
 A comprehensive toolkit for extracting data from Paathshala (ICT Kerala's Moodle-based Learning Management System). This suite of Python scripts enables educators to efficiently gather practice quiz scores, assignment metadata, and grading information.
 
