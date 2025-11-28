@@ -150,7 +150,7 @@ def validate_session(session_id):
     except Exception:
         return False
 
-def prompt_for_credentials():
+def prompt_for_credentials(save_option=False):
     """Interactively prompt user for username and password"""
     print("\n[Auth] Cookie appears to be invalid or expired.")
     print("[Auth] Please enter your credentials to continue:\n")
@@ -158,13 +158,21 @@ def prompt_for_credentials():
     try:
         username = input("Username: ").strip()
         if not username:
-            return None, None
+            return None, None, False
         
         password = getpass.getpass("Password: ").strip()
         if not password:
-            return None, None
+            return None, None, False
         
-        return username, password
+        
+        # Ask if user wants to save credentials
+        if save_option:
+            save_creds = input("\nSave credentials to config file? (y/n): ").strip().lower()
+            should_save = save_creds in ['y', 'yes']
+        else:
+            should_save = False
+        
+        return username, password, should_save
     except (KeyboardInterrupt, EOFError):
         print("\n[Auth] Login cancelled by user")
         return None, None
@@ -263,10 +271,10 @@ if __name__ == "__main__":
         epilog="""
 Authentication (in order of priority):
   1. --cookie flag
-  2. --username and --password flags (generates and saves cookie to .config)
-  3. MOODLE_SESSION_ID environment variable
-  4. cookie from .config file
-  5. username/password from .config file (generates and saves cookie)
+  2. MOODLE_SESSION_ID environment variable
+  3. cookie from .config file
+  4. username/password from .config file (generates and saves cookie)
+  5. Interactive prompt (safer than command line)
 
 Config file format (.config):
   Option 1 (reusable cookie - fastest):
@@ -277,9 +285,6 @@ Config file format (.config):
     password=your_password
 
 Examples:
-  # First time with username/password (generates and saves cookie)
-  python script.py 450 --username myuser --password mypass
-  
   # Subsequent runs (reuses saved cookie - much faster!)
   python script.py 450
   
@@ -292,8 +297,6 @@ Examples:
     )
     parser.add_argument('course_id', type=int, help='Course ID to scrape')
     parser.add_argument('--cookie', '-c', help='Moodle session cookie')
-    parser.add_argument('--username', '-u', help='Username for login (will generate and save cookie)')
-    parser.add_argument('--password', '-p', help='Password for login (will generate and save cookie)')
     parser.add_argument('--threads', '-t', type=int, default=4, help='Number of threads (default: 4)')
     parser.add_argument('--config', type=str, default=CONFIG_FILE, help=f'Config file path (default: {CONFIG_FILE})')
     args = parser.parse_args()
@@ -311,32 +314,21 @@ Examples:
         SESSION_ID = args.cookie
         print("[Auth] Using cookie from command line")
     
-    # 2. Command line username/password arguments
-    elif args.username and args.password:
-        print("[Auth] Using username/password from command line")
-        SESSION_ID = login_and_get_cookie(args.username, args.password)
-        if SESSION_ID:
-            # Save cookie to config for future use
-            write_config(args.config, cookie=SESSION_ID)
-        else:
-            print("\n[Auth] ✗ Login failed. Please check credentials.")
-            sys.exit(1)
-    
-    # 3. Environment variable
+    # 2. Environment variable
     elif os.environ.get("MOODLE_SESSION_ID"):
         SESSION_ID = os.environ.get("MOODLE_SESSION_ID")
         print("[Auth] Using cookie from MOODLE_SESSION_ID environment variable")
     
-    # 4. Config file (cookie or username/password)
+    # 3. Config file (cookie or username/password)
     else:
         cookie, username, password = read_config(args.config)
         
-        # 4a. Try cookie from config first
+        # 3a. Try cookie from config first
         if cookie:
             SESSION_ID = cookie
             print("[Auth] Using saved cookie from config")
         
-        # 4b. Try username/password from config
+        # 3b. Try username/password from config
         elif username and password:
             print("[Auth] Using credentials from config")
             SESSION_ID = login_and_get_cookie(username, password)
@@ -347,20 +339,26 @@ Examples:
                 print("\n[Auth] ✗ Auto-login failed. Please check credentials.")
                 sys.exit(1)
         
-        # No authentication found
+        # No authentication found - prompt user
         else:
-            print(f"\n[Auth] ✗ No authentication provided.")
-            print(f"\nProvide authentication via:")
-            print(f"  1. Command line: --cookie 'your_cookie'")
-            print(f"  2. Command line: --username 'user' --password 'pass'")
-            print(f"  3. Environment:  export MOODLE_SESSION_ID='your_cookie'")
-            print(f"  4. Config file:  Create {args.config} with cookie or username/password")
-            print(f"\nConfig file format (option 1 - reusable cookie):")
-            print(f"  cookie=your_cookie_value")
-            print(f"\nConfig file format (option 2 - will generate and save cookie):")
-            print(f"  username=your_username")
-            print(f"  password=your_password")
-            sys.exit(1)
+            print(f"\n[Auth] No authentication configured.")
+            username, password, should_save = prompt_for_credentials(save_option=True)
+            
+            if username and password:
+                SESSION_ID = login_and_get_cookie(username, password)
+                if SESSION_ID:
+                    # Always save the cookie
+                    if should_save:
+                        write_config(args.config, cookie=SESSION_ID, username=username, password=password)
+                    else:
+                        write_config(args.config, cookie=SESSION_ID)
+                    print("[Auth] ✓ Successfully logged in")
+                else:
+                    print("\n[Auth] ✗ Login failed. Please check credentials and try again.")
+                sys.exit(1)
+            else:
+                print("\n[Auth] ✗ No credentials provided. Exiting.")
+                sys.exit(1)
 
     # Validate the session cookie and prompt for credentials if invalid
     if SESSION_ID:
@@ -369,17 +367,20 @@ Examples:
             print("[Auth] ✗ Cookie is invalid or expired")
             
             # Prompt for credentials interactively
-            username, password = prompt_for_credentials()
+            username, password, should_save = prompt_for_credentials()
             
             if username and password:
                 SESSION_ID = login_and_get_cookie(username, password)
                 if SESSION_ID:
-                    # Save the new cookie
-                    write_config(args.config, cookie=SESSION_ID)
+                    # Always save the cookie, optionally save credentials
+                    if should_save:
+                        write_config(args.config, cookie=SESSION_ID, username=username, password=password)
+                    else:
+                        write_config(args.config, cookie=SESSION_ID)
                     print("[Auth] ✓ Successfully logged in with new credentials")
                 else:
                     print("\n[Auth] ✗ Login failed. Please check credentials and try again.")
-                    sys.exit(1)
+                sys.exit(1)
             else:
                 print("\n[Auth] ✗ No credentials provided. Exiting.")
                 sys.exit(1)
